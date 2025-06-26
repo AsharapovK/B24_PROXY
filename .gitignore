@@ -1,0 +1,35 @@
+# Node.js
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+
+# Build
+/dist
+/build
+
+# IDE
+.vscode/
+.idea/
+
+# Cache
+.cache/
+.nyc_output/
+coverage/
+
+# Misc
+*.tgz
+*.swp 
