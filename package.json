@@ -8,7 +8,8 @@
     "start": "node index.js",
     "dev": "concurrently \"npm:dev:backend\" \"npm:dev:frontend\"",
     "dev:backend": "nodemon index.js",
-    "dev:frontend": "vite"
+    "dev:frontend": "vite",
+    "build": "vite build"
   },
   "dependencies": {
     "@mdi/font": "^7.4.47",
