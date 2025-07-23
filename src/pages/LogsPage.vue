@@ -60,10 +60,10 @@
           Логи отсутствуют
         </div>
         <div v-else>
-          <div class="mb-3">Показано {{ logs.length }} запросов</div>
+          <div class="mb-3">Показано {{ visibleLogs.length }} из {{ logs.length }} запросов</div>
           <div class="logs-group-list">
             <v-expansion-panels
-              v-for="log in sortedLogs"
+              v-for="log in sortedLogs.slice(0, MAX_LOGS)"
               :key="log.id"
               v-model="openedPanels"
               multiple
@@ -173,6 +173,8 @@ const store = useLogsStore();
 const { logs, loading, error, queue, size, pending } = storeToRefs(store);
 const openedPanels = ref([]);
 const animatedChips = ref(new Set());
+const MAX_LOGS = 200;
+const visibleLogs = computed(() => store.logs.slice(0, MAX_LOGS));
 
 watch(
   () => store.logs,
