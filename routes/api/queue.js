@@ -4,7 +4,7 @@ console.log("DEBUG queue.js loaded");
  * Экспортирует Express router с эндпоинтами для добавления и получения статуса очереди.
  */
 import express from "express";
-import { requestQueue } from "../../services/queueService.js";
+import { requestQueue, getQueuePositionById } from "../../services/queueService.js";
 import logService from "../../services/logService.js";
 import { createRequire } from "module";
 import axios from "axios";
@@ -260,6 +260,51 @@ router.post("/proxy", (req, res) => {
     target: targetUrl,
     requestId,
   });
+});
+
+/**
+ * @openapi
+ * /api/queue/position:
+ *   get:
+ *     summary: Получить позицию в очереди по ID сделки или счета
+ *     parameters:
+ *       - in: query
+ *         name: dealId
+ *         schema:
+ *           type: string
+ *         required: false
+ *         description: ID сделки
+ *       - in: query
+ *         name: invoiceId
+ *         schema:
+ *           type: string
+ *         required: false
+ *         description: ID счета
+ *     responses:
+ *       200:
+ *         description: Позиция в очереди
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 position:
+ *                   type: integer
+ *                 message:
+ *                   type: string
+ */
+router.get("/queue/position", (req, res) => {
+  const { dealId, invoiceId } = req.query;
+  if (!dealId && !invoiceId) {
+    return res.status(400).json({ success: false, message: "Нужно указать dealId или invoiceId" });
+  }
+  const position = getQueuePositionById({ dealId, invoiceId });
+  if (position === null) {
+    return res.status(404).json({ success: false, message: "ID не найден в очереди" });
+  }
+  res.json({ success: true, position });
 });
 
 export default router;
