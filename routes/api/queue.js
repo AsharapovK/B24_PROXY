@@ -4,8 +4,8 @@ console.log("DEBUG queue.js loaded");
  * Экспортирует Express router с эндпоинтами для добавления и получения статуса очереди.
  */
 import express from "express";
-import { requestQueue, getQueuePositionById } from "../../services/queueService.js";
-import logService from "../../services/logService.js";
+import { requestQueue, getQueuePositionById, getQueueStatusById } from "../../services/queueService.js";
+import logService, { searchLogs } from "../../services/logService.js";
 import { createRequire } from "module";
 import axios from "axios";
 const require = createRequire(import.meta.url);
@@ -90,12 +90,23 @@ async function sendWithRetries(url, retries = MAX_RETRIES) {
  *                 queue:
  *                   type: array
  */
-router.get("/queue", (req, res) => {
+router.get("/", (req, res) => {
+  // Получаем queued задачи из logGroups
+  const logGroups = requestQueue._logGroups || {};
+  const queueArr = Object.values(logGroups)
+    .filter(g => g.status === 'queued')
+    .map(g => ({
+      id: g.id,
+      dealId: g.dealId,
+      invoceId: g.invoceId,
+      status: g.status,
+      timestamp: g.events?.find(e => e.type === 'queued')?.timestamp || null
+    }));
   res.json({
     success: true,
     size: requestQueue.size,
     pending: requestQueue.pending,
-    queue: [], // Можно добавить детали очереди, если нужно
+    queue: queueArr,
   });
 });
 
@@ -290,21 +301,118 @@ router.post("/proxy", (req, res) => {
  *               properties:
  *                 success:
  *                   type: boolean
+ *                 status:
+ *                   type: string
  *                 position:
  *                   type: integer
  *                 message:
  *                   type: string
  */
-router.get("/queue/position", (req, res) => {
-  const { dealId, invoiceId } = req.query;
-  if (!dealId && !invoiceId) {
-    return res.status(400).json({ success: false, message: "Нужно указать dealId или invoiceId" });
+/**
+ * @openapi
+ * /api/queue/position:
+ *   get:
+ *     summary: Получить позицию в очереди по ID сделки, счета или requestId
+ *     parameters:
+ *       - in: query
+ *         name: dealId
+ *         schema:
+ *           type: string
+ *         required: false
+ *         description: ID сделки
+ *       - in: query
+ *         name: invoiceId
+ *         schema:
+ *           type: string
+ *         required: false
+ *         description: ID счета
+ *       - in: query
+ *         name: id
+ *         schema:
+ *           type: string
+ *         required: false
+ *         description: Request ID (если известен)
+ *     responses:
+ *       200:
+ *         description: Информация о запросе
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 status:
+ *                   type: string
+ *                   enum: [queued, processing, completed, not_found]
+ *                 position:
+ *                   type: integer
+ *                   nullable: true
+ *                   description: Позиция в очереди (только для status=queued)
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *                   description: Время последнего события
+ *                 message:
+ *                   type: string
+ *                   description: Дополнительная информация
+ *       400:
+ *         description: Не указаны параметры поиска
+ *       404:
+ *         description: Запись не найдена ни в очереди, ни в логах
+ */
+router.get("/position", (req, res) => {
+  const { dealId, invoiceId, id } = req.query;
+  
+  // Валидация входных параметров
+  if (!dealId && !invoiceId && !id) {
+    return res.status(400).json({ 
+      success: false, 
+      message: "Нужно указать хотя бы один из параметров: id, dealId или invoiceId" 
+    });
   }
-  const position = getQueuePositionById({ dealId, invoiceId });
-  if (position === null) {
-    return res.status(404).json({ success: false, message: "ID не найден в очереди" });
+
+  // Сначала проверяем активную очередь
+  const queueResult = getQueueStatusById({ dealId, invoiceId, id });
+  if (queueResult) {
+    const { status, position, logGroup } = queueResult;
+    return res.json({ 
+      success: true, 
+      status,
+      position: status === 'queued' ? position : null,
+      timestamp: logGroup?.timestamp || new Date().toISOString(),
+      message: status === 'queued' ? `Запрос в очереди, позиция: ${position + 1}` : 'Запрос в обработке'
+    });
   }
-  res.json({ success: true, position });
+
+  // Если не нашли в активной очереди, ищем в логах
+  const logEntries = searchLogs({ dealId, invoiceId, id });
+  if (logEntries.length > 0) {
+    // Сортируем по времени (новые записи первыми)
+    const sortedLogs = logEntries.sort((a, b) => 
+      new Date(b.timestamp) - new Date(a.timestamp)
+    );
+    
+    // Берем самую свежую запись
+    const latestLog = sortedLogs[0];
+    
+    return res.json({
+      success: true,
+      status: 'completed',
+      position: null,
+      timestamp: latestLog.timestamp,
+      message: 'Запрос уже был обработан',
+      lastEvent: latestLog.events?.[latestLog.events.length - 1]?.message || 'Завершено',
+      completedAt: latestLog.timestamp
+    });
+  }
+
+  // Если не нашли нигде
+  return res.status(404).json({ 
+    success: false, 
+    status: 'not_found',
+    message: `Запрос с ${id ? `ID=${id}` : dealId ? `dealId=${dealId}` : `invoiceId=${invoiceId}`} не найден` 
+  });
 });
 
 export default router;

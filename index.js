@@ -15,6 +15,8 @@ import crypto from "crypto";
 import { addLogEntry, updateLogEntry } from "./services/logService.js";
 import { initWebSocketServer } from "./services/websocketService.js";
 import logsRouter from "./routes/api/logs.js";
+import queueRouter from "./routes/api/queue.js";
+import statsRouter from "./routes/api/stats.js";
 import errorHandler from "./middlewares/errorHandler.js";
 import swaggerJsdoc from "swagger-jsdoc";
 import swaggerUi from "swagger-ui-express";
@@ -101,6 +103,8 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // API маршруты
 app.use("/api/logs", logsRouter);
+app.use("/api/queue", queueRouter);
+app.use("/api/stats", statsRouter);
 
 // Основной прокси-маршрут
 app.all("/api/proxy", (req, res) => {

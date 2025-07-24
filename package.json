@@ -1,6 +1,6 @@
 {
   "name": "proxy-server-pq",
-  "version": "3.1.0",
+  "version": "3.2.1",
   "description": "Прокси-сервер с очередью запросов",
   "main": "index.js",
   "type": "module",

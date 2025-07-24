@@ -6,6 +6,7 @@ export const useLogsStore = defineStore('logs', {
     queue: [],
     size: 0,
     pending: 0,
+    totalLogs: 0,
     loading: false,
     error: '',
     ws: null,
@@ -31,6 +32,7 @@ export const useLogsStore = defineStore('logs', {
           this.queue = data.queue || [];
           this.size = data.size || 0;
           this.pending = data.pending || 0;
+          this.totalLogs = data.total || 0;
         } else {
           this.error = data.error || 'Failed to fetch logs';
         }

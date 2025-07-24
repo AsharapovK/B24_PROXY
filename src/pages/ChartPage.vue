@@ -22,7 +22,7 @@
         class="queue-stat"
         style="margin-bottom: 10px"
       >
-        В очереди: <b>{{ logsStore.queue.length }}</b>
+        <!-- В очереди: <b>{{ logsStore.queue.length }}</b> -->
       </div>
       <div class="chart-container">
         <canvas ref="chartRef"></canvas>

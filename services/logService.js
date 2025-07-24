@@ -77,6 +77,44 @@ function formatDate(date = new Date()) {
   return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+/**
+ * Поиск записей в логах по dealId, invoiceId или id
+ * @param {Object} params - Параметры поиска { dealId, invoiceId, id }
+ * @returns {Array} - Массив найденных записей логов
+ */
+export function searchLogs({ dealId, invoiceId, id }) {
+  try {
+    if (!fs.existsSync(logPath)) {
+      return [];
+    }
+
+    const fileContent = fs.readFileSync(logPath, 'utf8');
+    const lines = fileContent.split('\n').filter(line => line.trim() !== '');
+    const results = [];
+
+    for (const line of lines) {
+      try {
+        const logEntry = JSON.parse(line);
+        const matches = 
+          (id && logEntry.id === id) ||
+          (dealId && logEntry.dealId === dealId) ||
+          (invoiceId && logEntry.invoceId === invoiceId);
+
+        if (matches) {
+          results.push(logEntry);
+        }
+      } catch (e) {
+        console.error('Ошибка парсинга строки лога:', e);
+      }
+    }
+
+    return results;
+  } catch (e) {
+    console.error('Ошибка при чтении логов:', e);
+    return [];
+  }
+}
+
 // In-memory Map для групп логов (только для grouped_request)
 const logGroupsMap = new Map();
 
