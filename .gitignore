@@ -3,6 +3,7 @@ node_modules/
 
 #config
 proxy-config.cjs
+vite.config.js
 
 # Logs
 logs/

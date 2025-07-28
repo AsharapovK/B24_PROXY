@@ -9,8 +9,8 @@ module.exports = {
   PROXY_PORT: 7777,
 
   // IP на который отправляются запросы из очереди
-  TARGET_BASE_URL: "https://script.google.com/macros/s/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/exec",
-  TARGET_BASE_URL_INVOICE: "https://script.google.com/macros/s/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/exec",
+  TARGET_BASE_URL: "https://script.google.com/macros/s/AKfycbzu-3bcJI4L8gXdgYSqPhnp2HrtYO9S8MGZUPV18v4OEBf5pAYHRyCaSeUBWN6TJFR_/exec",
+  TARGET_BASE_URL_INVOICE: "https://script.google.com/macros/s/AKfycbzu-3bcJI4L8gXdgYSqPhnp2HrtYO9S8MGZUPV18v4OEBf5pAYHRyCaSeUBWN6TJFR_/exec",
 
   // Таймаут запроса
   REQUEST_TIMEOUT: 36000,

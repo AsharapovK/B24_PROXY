@@ -32,7 +32,14 @@ process.on("unhandledRejection", (reason, promise) => {
 });
 
 const require = createRequire(import.meta.url);
-const { PROXY_PORT, SERVER_IP, TARGET_BASE_URL, REQUEST_TIMEOUT, MAX_RETRIES, MAX_CONCURRENCY } = require("./config/proxy-config.cjs");
+const {
+  PROXY_PORT,
+  SERVER_IP,
+  TARGET_BASE_URL,
+  REQUEST_TIMEOUT,
+  MAX_RETRIES,
+  MAX_CONCURRENCY,
+} = require("./config/proxy-config.cjs");
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,50 +63,89 @@ async function sendWithRetries(url, retries = MAX_RETRIES, logId) {
     ...data,
   });
 
-  await updateLogEntry(logId, createEvent('processing', 'Запрос взят в работу'));
+  await updateLogEntry(
+    logId,
+    createEvent("processing", "Запрос взят в работу")
+  );
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      await updateLogEntry(logId, createEvent('request', `Отправка №${attempt}`));
+      await updateLogEntry(
+        logId,
+        createEvent("request", `Отправка №${attempt}`)
+      );
       const source = axios.CancelToken.source();
-      const timeout = setTimeout(() => source.cancel(`Timeout after ${REQUEST_TIMEOUT}ms`), REQUEST_TIMEOUT);
+      const timeout = setTimeout(
+        () => source.cancel(`Timeout after ${REQUEST_TIMEOUT}ms`),
+        REQUEST_TIMEOUT
+      );
 
       const response = await axios.post(url, {}, { cancelToken: source.token });
       clearTimeout(timeout);
 
       if (response.status === 200) {
-        await updateLogEntry(logId, createEvent('response', `Ответ | Статус: ${response.status}`, { status: response.status, data: response.data }));
-        return;
+        const responseData = response.data || {};
+        if (responseData.status === "success") {
+          await updateLogEntry(
+            logId,
+            createEvent(
+              "response",
+              `Успешный ответ | Статус: ${response.status}`,
+              { status: response.status, data: responseData }
+            )
+          );
+          return;
+        } else {
+          await updateLogEntry(
+            logId,
+            createEvent(
+              "error",
+              `Ошибка выполнения запроса в таблице | Статус: ${responseData.status}`,
+              { status: response.status, data: responseData }
+            )
+          );
+        }
       } else {
-        await updateLogEntry(logId, createEvent('warn', `Неуспешный статус: ${response.status}`, { status: response.status }));
+        await updateLogEntry(
+          logId,
+          createEvent("warn", `Неуспешный статус: ${response.status}`, {
+            status: response.status,
+          })
+        );
       }
     } catch (err) {
-      const errorMessage = err.message || 'Неизвестная ошибка';
-      await updateLogEntry(logId, createEvent('error', `Ошибка: ${errorMessage}`, { attempt }));
+      const errorMessage = err.message || "Неизвестная ошибка";
+      await updateLogEntry(
+        logId,
+        createEvent("error", `Ошибка: ${errorMessage}`, { attempt })
+      );
     }
   }
 
-  await updateLogEntry(logId, createEvent('error', `Лимит попыток исчерпан`, { retries }));
+  await updateLogEntry(
+    logId,
+    createEvent("error", `Лимит попыток исчерпан`, { retries })
+  );
 }
 
 // Мидлвары
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'dist')));
+app.use(express.static(path.join(__dirname, "dist")));
 
 // Swagger
 const swaggerOptions = {
   swaggerDefinition: {
-    openapi: '3.0.0',
+    openapi: "3.1.1",
     info: {
-      title: 'B24 QProxy API',
-      version: '1.0.0',
+      title: "B24 QProxy API",
+      version: "2.1.0",
     },
   },
-  apis: ['./routes/api/*.js'],
+  apis: ["./routes/api/*.js"],
 };
 const swaggerSpec = swaggerJsdoc(swaggerOptions);
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // API маршруты
 app.use("/api/logs", logsRouter);
@@ -125,10 +171,10 @@ app.all("/api/proxy", (req, res) => {
 
   let type, typeMessage;
   if (req.query.s5) {
-    type = 'invoice';
+    type = "invoice";
     typeMessage = `Счет (ID: ${req.query.s5})`;
   } else {
-    type = 'deal';
+    type = "deal";
     typeMessage = `Сделка (ID: ${dealId})`;
   }
 
@@ -140,17 +186,19 @@ app.all("/api/proxy", (req, res) => {
     method: methodForLogging,
     timestamp: new Date().toISOString(),
     inProgress: true,
-    events: [{
-      type: 'queued',
-      message: `Запрос добавлен в очередь: ${typeMessage}`,
-      timestamp: new Date().toISOString()
-    }]
+    events: [
+      {
+        type: "queued",
+        message: `Запрос добавлен в очередь: ${typeMessage}`,
+        timestamp: new Date().toISOString(),
+      },
+    ],
   };
 
   addLogEntry(initialLog);
 
   queue.add(() => sendWithRetries(targetUrl.href, MAX_RETRIES, logId));
-  
+
   res.status(202).json({
     success: true,
     message: "Запрос принят в обработку.",
@@ -158,15 +206,15 @@ app.all("/api/proxy", (req, res) => {
     logId,
     target: targetUrl.href,
     dealId: req.query.DealID || null,
-    s5: req.query.s5 || null
+    s5: req.query.s5 || null,
   });
 });
 
 app.use(errorHandler);
 
 // Отдаем SPA для всех остальных запросов
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "dist", "index.html"));
 });
 
 server.listen(PROXY_PORT, SERVER_IP, () => {
