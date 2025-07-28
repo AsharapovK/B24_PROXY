@@ -2,16 +2,9 @@
   <v-app>
     <v-app-bar app color="primary" dark>
       <div class="page-container app-bar-flex">
-        <v-toolbar-title>b24QProxy</v-toolbar-title>
+        <v-toolbar-title>B24PROXY</v-toolbar-title>
         <div class="menu-group">
-          <v-btn
-            v-for="item in menuItems"
-            :key="item.to"
-            :to="item.to"
-            variant="text"
-            color="white"
-            :class="{ 'v-btn--active': $route.path === item.to }"
-          >
+          <v-btn v-for="item in menuItems" :key="item.to" :to="item.to" variant="text" color="white" :class="{ 'v-btn--active': $route.path === item.to }">
             <v-icon left>{{ item.icon }}</v-icon>
             {{ item.title }}
           </v-btn>
@@ -25,16 +18,21 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
 const route = useRoute();
 const router = useRouter();
 const tab = ref(route.path);
-watch(() => route.path, (val) => { tab.value = val; });
+watch(
+  () => route.path,
+  (val) => {
+    tab.value = val;
+  }
+);
 
 const menuItems = [
-  { to: '/logs', title: 'Логи', icon: 'mdi-format-list-bulleted' },
-  { to: '/chart', title: 'Статистика', icon: 'mdi-chart-bar' },
+  { to: "/logs", title: "Логи", icon: "mdi-format-list-bulleted" },
+  { to: "/chart", title: "Статистика", icon: "mdi-chart-bar" },
 ];
 </script>
 
@@ -51,6 +49,6 @@ const menuItems = [
   margin-left: 0;
 }
 .v-btn--active {
-  background: rgba(255,255,255,0.15) !important;
+  background: rgba(255, 255, 255, 0.15) !important;
 }
 </style>

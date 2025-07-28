@@ -32,14 +32,7 @@ process.on("unhandledRejection", (reason, promise) => {
 });
 
 const require = createRequire(import.meta.url);
-const {
-  PROXY_PORT,
-  SERVER_IP,
-  TARGET_BASE_URL,
-  REQUEST_TIMEOUT,
-  MAX_RETRIES,
-  MAX_CONCURRENCY,
-} = require("./config/proxy-config.cjs");
+const { PROXY_PORT, SERVER_IP, TARGET_BASE_URL, REQUEST_TIMEOUT, MAX_RETRIES, MAX_CONCURRENCY } = require("./config/proxy-config.cjs");
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -63,22 +56,13 @@ async function sendWithRetries(url, retries = MAX_RETRIES, logId) {
     ...data,
   });
 
-  await updateLogEntry(
-    logId,
-    createEvent("processing", "Запрос взят в работу")
-  );
+  await updateLogEntry(logId, createEvent("processing", "Запрос взят в работу"));
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      await updateLogEntry(
-        logId,
-        createEvent("request", `Отправка №${attempt}`)
-      );
+      await updateLogEntry(logId, createEvent("request", `Отправка №${attempt}`));
       const source = axios.CancelToken.source();
-      const timeout = setTimeout(
-        () => source.cancel(`Timeout after ${REQUEST_TIMEOUT}ms`),
-        REQUEST_TIMEOUT
-      );
+      const timeout = setTimeout(() => source.cancel(`Timeout after ${REQUEST_TIMEOUT}ms`), REQUEST_TIMEOUT);
 
       const response = await axios.post(url, {}, { cancelToken: source.token });
       clearTimeout(timeout);
@@ -86,23 +70,15 @@ async function sendWithRetries(url, retries = MAX_RETRIES, logId) {
       if (response.status === 200) {
         const responseData = response.data || {};
         if (responseData.status === "success") {
-          await updateLogEntry(
-            logId,
-            createEvent(
-              "response",
-              `Успешный ответ | Статус: ${response.status}`,
-              { status: response.status, data: responseData }
-            )
-          );
+          await updateLogEntry(logId, createEvent("response", `Успешный ответ | Статус: ${response.status}`, { status: response.status, data: responseData }));
           return;
         } else {
           await updateLogEntry(
             logId,
-            createEvent(
-              "error",
-              `Ошибка выполнения запроса в таблице | Статус: ${responseData.status}`,
-              { status: response.status, data: responseData }
-            )
+            createEvent("error", `Ошибка выполнения запроса в таблице | Статус: ${responseData.status}`, {
+              status: response.status,
+              data: responseData,
+            })
           );
         }
       } else {
@@ -115,17 +91,11 @@ async function sendWithRetries(url, retries = MAX_RETRIES, logId) {
       }
     } catch (err) {
       const errorMessage = err.message || "Неизвестная ошибка";
-      await updateLogEntry(
-        logId,
-        createEvent("error", `Ошибка: ${errorMessage}`, { attempt })
-      );
+      await updateLogEntry(logId, createEvent("error", `Ошибка: ${errorMessage}`, { attempt }));
     }
   }
 
-  await updateLogEntry(
-    logId,
-    createEvent("error", `Лимит попыток исчерпан`, { retries })
-  );
+  await updateLogEntry(logId, createEvent("error", `Лимит попыток исчерпан`, { retries }));
 }
 
 // Мидлвары
