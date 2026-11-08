@@ -1,30 +1,24 @@
 /**
  * Централизованный middleware для обработки ошибок Express.
- * Логирует ошибку и возвращает корректный JSON-ответ клиенту.
- * Использует logService для записи ошибок.
+ * Не использует файловый logService и не пишет query/body/stack ни в ответ,
+ * ни в stdout: внешние ошибки 500 отдаются обобщённо, без раскрытия секретов.
  */
-import logService from "../services/logService.js";
 
 const errorHandler = (err, req, res, next) => {
-  const statusCode = err.statusCode || 500;
-  // Всегда подробный вывод (dev-режим)
-  const isProduction = false;
+  void next;
+  const statusCode = err && err.statusCode ? err.statusCode : 500;
 
-  logService('error', "Ошибка:", {
-    error: err.message,
-    stack: isProduction ? undefined : err.stack,
-    path: req.path,
-    method: req.method,
-    params: req.params,
-    query: req.query,
-    body: req.body,
-  });
+  // Санированный сигнал в stderr без query/body/stack.
+  const reason = String(err?.code || err?.name || "error").slice(0, 80);
+  console.error(`error: ${statusCode} на ${req.method} ${req.path}: ${reason}`);
+
+  // 500 — обобщённое сообщение; иные — сообщение ошибки без деталей запроса.
+  const message = statusCode >= 500 ? "Внутренняя ошибка сервера" : "Ошибка запроса";
 
   res.status(statusCode).json({
     success: false,
-    message: isProduction && statusCode === 500 ? "Внутренняя ошибка сервера" : err.message,
-    ...(!isProduction && { stack: err.stack }),
+    message,
   });
 };
 
-export default errorHandler; 
+export default errorHandler;

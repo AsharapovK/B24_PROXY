@@ -3,105 +3,73 @@
  * Инициализирует Express, очередь, логирование, WebSocket, роуты и middleware.
  * Точка входа для всего приложения.
  */
+import dns from "dns";
+// Принудительно используем IPv4 для предотвращения сетевых сбоев ENETUNREACH внутри Docker
+dns.setDefaultResultOrder("ipv4first");
+
 import express from "express";
 import { createServer } from "http";
-import axios from "axios";
-import PQueue from "p-queue";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
-import crypto from "crypto";
 
-import { addLogEntry, updateLogEntry } from "./services/logService.js";
 import { initWebSocketServer } from "./services/websocketService.js";
+import { checkDatabase, markInterrupted, pool } from "./services/requestStore.js";
+import { handleProxyRequest, INSTANCE_REF } from "./services/proxyHandler.js";
+import { syncRecentInvoices } from "./services/invoiceSync.js";
 import logsRouter from "./routes/api/logs.js";
 import queueRouter from "./routes/api/queue.js";
 import statsRouter from "./routes/api/stats.js";
 import errorHandler from "./middlewares/errorHandler.js";
+import adminAuth, { loadAdminConfig } from "./middlewares/adminAuth.js";
 import swaggerJsdoc from "swagger-jsdoc";
 import swaggerUi from "swagger-ui-express";
 
 // Обработка необработанных исключений
 process.on("uncaughtException", (error) => {
-  console.error("Необработанное исключение:", error);
+  console.error("Необработанное исключение:", error?.code || error?.name || "error");
   process.exit(1);
 });
 
-process.on("unhandledRejection", (reason, promise) => {
-  console.error("Необработанный промис:", reason);
+process.on("unhandledRejection", (reason) => {
+  console.error("Необработанный промис:", reason?.code || reason?.name || "error");
+  process.exit(1);
 });
 
 const require = createRequire(import.meta.url);
-const { PROXY_PORT, SERVER_IP, TARGET_BASE_URL, REQUEST_TIMEOUT, MAX_RETRIES, MAX_CONCURRENCY } = require("./config/proxy-config.cjs");
+const { PROXY_PORT, SERVER_IP } = require("./config/proxy-config.cjs");
+const ADMIN_PORT = Number.parseInt(process.env.ADMIN_PORT || "8776", 10);
+
+// Fail-closed: без валидной конфигурации администратора сервер не стартует.
+loadAdminConfig();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const server = createServer(app);
+const publicAdminApp = express();
+const adminApp = express();
+const adminServer = createServer(adminApp);
 
-// Инициализация WebSocket сервера
-initWebSocketServer(server);
+// Публичная панель сохраняет прежний доступ без авторизации; localhost-панель требует Basic Auth.
+initWebSocketServer({ server, publicAccess: true }, { server: adminServer });
 
-const queue = new PQueue({ concurrency: MAX_CONCURRENCY });
-
-async function sendWithRetries(url, retries = MAX_RETRIES, logId) {
-  const urlObj = new URL(url);
-  const dealId = urlObj.searchParams.get("DEAL_ID") || "N/A";
-
-  const createEvent = (type, message, data = {}) => ({
-    type,
-    message,
-    timestamp: new Date().toISOString(),
-    ...data,
-  });
-
-  await updateLogEntry(logId, createEvent("processing", "Запрос взят в работу"));
-
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      await updateLogEntry(logId, createEvent("request", `Отправка №${attempt}`));
-      const source = axios.CancelToken.source();
-      const timeout = setTimeout(() => source.cancel(`Timeout after ${REQUEST_TIMEOUT}ms`), REQUEST_TIMEOUT);
-
-      const response = await axios.post(url, {}, { cancelToken: source.token });
-      clearTimeout(timeout);
-
-      if (response.status === 200) {
-        const responseData = response.data || {};
-        if (responseData.status === "success") {
-          await updateLogEntry(logId, createEvent("response", `Успешный ответ | Статус: ${response.status}`, { status: response.status, data: responseData }));
-          return;
-        } else {
-          await updateLogEntry(
-            logId,
-            createEvent("error", `Ошибка выполнения запроса в таблице | Статус: ${responseData.status}`, {
-              status: response.status,
-              data: responseData,
-            })
-          );
-        }
-      } else {
-        await updateLogEntry(
-          logId,
-          createEvent("warn", `Неуспешный статус: ${response.status}`, {
-            status: response.status,
-          })
-        );
-      }
-    } catch (err) {
-      const errorMessage = err.message || "Неизвестная ошибка";
-      await updateLogEntry(logId, createEvent("error", `Ошибка: ${errorMessage}`, { attempt }));
-    }
-  }
-
-  await updateLogEntry(logId, createEvent("error", `Лимит попыток исчерпан`, { retries }));
-}
-
-// Мидлвары
+// Мидлвары (парсинг тела доступен публичному прокси-маршруту)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, "dist")));
+
+// Публичный приём запросов и проверка здоровья сохраняют действующие webhook-маршруты.
+app.all("/api/proxy", handleProxyRequest);
+app.post("/api/queue/proxy", handleProxyRequest);
+app.get("/healthz", async (req, res) => {
+  try {
+    await checkDatabase();
+    res.status(200).json({ status: "ok", db: "up" });
+  } catch {
+    res.status(503).json({ status: "error", db: "down" });
+  }
+});
 
 // Swagger
 const swaggerOptions = {
@@ -115,80 +83,88 @@ const swaggerOptions = {
   apis: ["./routes/api/*.js"],
 };
 const swaggerSpec = swaggerJsdoc(swaggerOptions);
-app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
-// API маршруты
-app.use("/api/logs", logsRouter);
-app.use("/api/queue", queueRouter);
-app.use("/api/stats", statsRouter);
-
-// Основной прокси-маршрут
-app.all("/api/proxy", (req, res) => {
-  const logId = crypto.randomUUID();
-
-  // Выбор целевого URL
-  let baseUrl;
-  if (req.query.s5) {
-    baseUrl = require("./config/proxy-config.cjs").TARGET_BASE_URL_INVOICE;
-  } else {
-    baseUrl = require("./config/proxy-config.cjs").TARGET_BASE_URL;
-  }
-  const targetUrl = new URL(baseUrl);
-  targetUrl.search = new URLSearchParams(req.query).toString();
-
-  const dealId = req.query.DealID || "N/A";
-  const methodForLogging = req.query.Workflow || "proxy_request";
-
-  let type, typeMessage;
-  if (req.query.s5) {
-    type = "invoice";
-    typeMessage = `Счет (ID: ${req.query.s5})`;
-  } else {
-    type = "deal";
-    typeMessage = `Сделка (ID: ${dealId})`;
-  }
-
-  const initialLog = {
-    id: logId,
-    dealId,
-    invoceId: req.query.s5 || null,
-    type,
-    method: methodForLogging,
-    timestamp: new Date().toISOString(),
-    inProgress: true,
-    events: [
-      {
-        type: "queued",
-        message: `Запрос добавлен в очередь: ${typeMessage}`,
-        timestamp: new Date().toISOString(),
-      },
-    ],
-  };
-
-  addLogEntry(initialLog);
-
-  queue.add(() => sendWithRetries(targetUrl.href, MAX_RETRIES, logId));
-
-  res.status(202).json({
-    success: true,
-    message: "Запрос принят в обработку.",
-    queueSize: queue.size,
-    logId,
-    target: targetUrl.href,
-    dealId: req.query.DealID || null,
-    s5: req.query.s5 || null,
+function configureAdminApp(application, authenticated) {
+  if (authenticated) application.use(adminAuth);
+  application.use(express.static(path.join(__dirname, "dist")));
+  application.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+  application.use("/api/logs", logsRouter);
+  application.use("/api/queue", queueRouter);
+  application.use("/api/stats", statsRouter);
+  application.use(errorHandler);
+  application.get("*", (_req, res) => {
+    res.sendFile(path.join(__dirname, "dist", "index.html"));
   });
-});
+}
 
+configureAdminApp(publicAdminApp, false);
+configureAdminApp(adminApp, true);
+
+// На публичном порту сохраняем прежнюю неавторизованную админку после webhook-маршрутов.
+app.use(publicAdminApp);
 app.use(errorHandler);
 
-// Отдаем SPA для всех остальных запросов
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "dist", "index.html"));
-});
+// Проверка БД и маркировка прерванных запросов перед приёмом трафика
+async function start() {
+  try {
+    await checkDatabase();
+  } catch (error) {
+    console.error("Не удалось подключиться к БД при старте:", error?.code || error?.name || "error");
+    process.exit(1);
+  }
 
-server.listen(PROXY_PORT, SERVER_IP, () => {
-  console.log(`Сервер запущен: http://${SERVER_IP}:${PROXY_PORT}`);
-});
+  try {
+    const updated = await markInterrupted(INSTANCE_REF);
+    if (updated > 0) {
+      console.log(`Помечено прерванных запросов: ${updated} (source_ref=${INSTANCE_REF})`);
+    }
+  } catch (error) {
+    console.error("Не удалось пометить прерванные запросы:", error?.code || error?.name || "error");
+    process.exit(1);
+  }
+
+  // Регулярная фоновая синхронизация счетов из Bitrix24 (за сегодня и вчера)
+  const SYNC_INTERVAL_MS = Number.parseInt(process.env.INVOICE_SYNC_INTERVAL_MS || String(10 * 60 * 1000), 10);
+  let invoiceSyncRunning = false;
+  const runPeriodicSync = async () => {
+    if (invoiceSyncRunning) return;
+    invoiceSyncRunning = true;
+    try {
+      const res = await syncRecentInvoices({ days: 2 });
+      if (res.updated > 0 || res.inserted > 0) {
+        console.log(`[InvoiceSync] Синхронизировано: ${res.updated} обновлено, ${res.inserted} добавлено`);
+      }
+    } catch (error) {
+      console.error("[InvoiceSync] Ошибка фоновой синхронизации:", error?.code || error?.name || error?.message || "error");
+    } finally {
+      invoiceSyncRunning = false;
+    }
+  };
+  const invoiceSyncTimer = setInterval(runPeriodicSync, SYNC_INTERVAL_MS);
+  invoiceSyncTimer.unref();
+  void runPeriodicSync();
+
+  server.listen(PROXY_PORT, SERVER_IP, () => {
+    console.log(`Публичный PROXY запущен: ${SERVER_IP}:${PROXY_PORT}`);
+  });
+  adminServer.listen(ADMIN_PORT, "0.0.0.0", () => {
+    console.log(`Административный порт запущен: ${ADMIN_PORT}`);
+  });
+}
+
+start();
+
+// Управляемое завершение: закрываем сервер и пул БД
+function shutdown(signal) {
+  console.log(`Получен сигнал ${signal}, завершение...`);
+  server.close(() => {
+    adminServer.close(() => {
+      pool.end().finally(() => process.exit(0));
+    });
+  });
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
 
 export default app;

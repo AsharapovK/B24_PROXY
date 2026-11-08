@@ -1,10 +1,6 @@
 import express from "express";
 import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { LOG_FILE_PATH } from "../services/logPath.js";
 
 const router = express.Router();
 
@@ -15,7 +11,7 @@ const router = express.Router();
 // Получение логов
 router.get("/", (req, res) => {
   try {
-    const logPath = path.join(__dirname, "../app.log");
+    const logPath = LOG_FILE_PATH;
     const logs = fs.readFileSync(logPath, "utf8");
     const allLogs = logs
       .split("\n")

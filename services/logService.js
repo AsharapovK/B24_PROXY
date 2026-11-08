@@ -5,10 +5,10 @@
  */
 import logger from "../config/logger.js";
 import fs from "fs";
-import path from "path";
+import { LOG_FILE_PATH } from "./logPath.js";
 import { getBroadcastLog } from "./websocketService.js";
 
-const logPath = path.join(process.cwd(), "app.log");
+const logPath = LOG_FILE_PATH;
 // Убедимся, что файл логов существует
 if (!fs.existsSync(logPath)) {
   fs.writeFileSync(logPath, "", 'utf8');
@@ -142,4 +142,4 @@ export default function logService(level, message, meta) {
   if (getBroadcastLog()) {
     getBroadcastLog()(logEntry);
   }
-} 
+}

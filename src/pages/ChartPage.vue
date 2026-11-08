@@ -18,6 +18,7 @@
         />
         <button @click="fetchStats">Применить</button>
       </div>
+      <p v-if="errorMessage" class="alert alert-error" role="alert">{{ errorMessage }}</p>
       <div
         class="queue-stat"
         style="margin-bottom: 10px"
@@ -33,17 +34,15 @@
 
 <script setup>
 import { ref, onMounted } from "vue";
-import { useLogsStore } from "../stores/logsStore";
 import Chart from "chart.js/auto";
 
-const logsStore = useLogsStore();
-
 const chartRef = ref(null);
-let chartInstance = null;
 const startDate = ref("");
 const endDate = ref("");
 const minDate = ref("");
 const maxDate = ref("");
+const errorMessage = ref("");
+let chartInstance = null;
 
 function formatDate(date) {
   const year = date.getFullYear();
@@ -53,8 +52,7 @@ function formatDate(date) {
 }
 
 function setDefaultDates() {
-  const today = new Date();
-  const todayStr = formatDate(today);
+  const todayStr = formatDate(new Date());
   startDate.value = todayStr;
   endDate.value = todayStr;
   minDate.value = "2000-01-01";
@@ -62,101 +60,30 @@ function setDefaultDates() {
 }
 
 function onStartDateChange() {
-  if (endDate.value && startDate.value > endDate.value) {
-    endDate.value = startDate.value;
-  }
+  if (endDate.value && startDate.value > endDate.value) endDate.value = startDate.value;
 }
+
 function onEndDateChange() {
-  if (startDate.value && endDate.value < startDate.value) {
-    startDate.value = endDate.value;
-  }
-}
-
-function parseDate(ts) {
-  if (!ts) return null;
-  if (ts instanceof Date) return ts;
-  const iso = Date.parse(ts);
-  if (!isNaN(iso)) return new Date(iso);
-  const match = ts.match(/(\d{2})\.(\d{2})\.(\d{4})[ ,T]?(\d{2}):(\d{2}):(\d{2})/);
-  if (match) {
-    const [_, d, m, y, h, min, s] = match;
-    return new Date(`${y}-${m}-${d}T${h}:${min}:${s}`);
-  }
-  return null;
-}
-
-function isInRange(ts, start, end) {
-  const d = parseDate(ts);
-  if (!d) return false;
-  // Сравниваем только даты (без времени)
-  const dYMD = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  const dStr = dYMD(d);
-  const dStart = start ? start : null;
-  const dEnd = end ? end : null;
-  if (dStart && dStr < dStart) return false;
-  if (dEnd && dStr > dEnd) return false;
-  return true;
-}
-
-function getLogStatus(log) {
-  if (!log || !log.events) return "unknown";
-  const hasResponse200 = log.events.some((e) => e.type === "response" && e.status === 200);
-  const hasError = log.events.some((e) => e.type === "error");
-  if (hasResponse200 && hasError) return "successWithError";
-  if (hasResponse200) return "success";
-  if (hasError) return "error";
-  return "other";
-}
-
-function getLatestTimestamp(log) {
-  if (!log || !log.events || !log.events.length) {
-    return log.timestamp;
-  }
-  return log.events[log.events.length - 1].timestamp;
-}
-
-function getRequestDurationInSeconds(log) {
-  if (!log || !log.events || log.events.length < 2) return null;
-
-  const start = parseDate(log.events[0].timestamp);
-  const end = parseDate(getLatestTimestamp(log));
-
-  if (!start || !end || end < start) return null;
-
-  return (end.getTime() - start.getTime()) / 1000;
+  if (startDate.value && endDate.value < startDate.value) endDate.value = startDate.value;
 }
 
 async function fetchStats() {
-  await logsStore.fetchLogs();
-  // Фильтрация по датам
-  const filtered = logsStore.logs.filter((log) => isInRange(log.timestamp, startDate.value, endDate.value));
-  // Подсчёт по часам
-  const hours = Array.from({ length: 24 }, (_, i) => i);
-  const success = Array(24).fill(0);
-  const successWithError = Array(24).fill(0);
-  const error = Array(24).fill(0);
-  const hourlyDurationSum = Array(24).fill(0);
-  const hourlyDurationCount = Array(24).fill(0);
-
-  filtered.forEach((log) => {
-    const d = parseDate(log.timestamp);
-    if (!d) return;
-    const hour = d.getHours();
-    const status = getLogStatus(log);
-    if (status === "success") success[hour]++;
-    else if (status === "successWithError") successWithError[hour]++;
-    else if (status === "error") error[hour]++;
-
-    const duration = getRequestDurationInSeconds(log);
-    if (duration !== null) {
-      hourlyDurationSum[hour] += duration;
-      hourlyDurationCount[hour]++;
+  errorMessage.value = "";
+  const query = new URLSearchParams({ startDate: startDate.value, endDate: endDate.value });
+  try {
+    const response = await fetch(`/api/stats/chart?${query}`);
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.error || "Не удалось загрузить статистику");
     }
-  });
-
-  const averageDurations = hourlyDurationSum.map((sum, i) => (hourlyDurationCount[i] > 0 ? (sum / hourlyDurationCount[i]).toFixed(1) : 0));
-
-  renderChart({ hours, success, successWithError, error, averageDurations });
+    renderChart(data);
+  } catch (error) {
+    if (chartInstance) {
+      chartInstance.destroy();
+      chartInstance = null;
+    }
+    errorMessage.value = error.message || "Не удалось загрузить статистику";
+  }
 }
 
 function renderChart({ hours, success, successWithError, error, averageDurations }) {
@@ -164,7 +91,7 @@ function renderChart({ hours, success, successWithError, error, averageDurations
   if (chartInstance) chartInstance.destroy();
   const hasData = success.some((x) => x > 0) || successWithError.some((x) => x > 0) || error.some((x) => x > 0);
   if (!hasData) {
-    alert("Нет данных за выбранный период");
+    errorMessage.value = "Нет данных за выбранный период";
     return;
   }
   chartInstance = new Chart(chartRef.value, {

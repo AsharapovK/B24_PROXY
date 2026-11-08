@@ -1,6 +1,7 @@
 import winston from "winston";
 import path from "path";
 import { fileURLToPath } from "url";
+import { LOG_FILE_PATH } from "../services/logPath.js";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import timezone from "dayjs/plugin/timezone.js";
@@ -28,7 +29,7 @@ const logger = winston.createLogger({
   defaultMeta: { service: "proxy-server" },
   transports: [
     new winston.transports.File({
-      filename: path.join(__dirname, "../app.log"),
+      filename: LOG_FILE_PATH,
       level: "info",
       maxsize: 5242880, // 5MB
       maxFiles: 5,

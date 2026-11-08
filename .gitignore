@@ -37,3 +37,6 @@ coverage/
 # Misc
 *.tgz
 *.swp 
+
+# Generated sync status
+/data/invoice-sync-status.json

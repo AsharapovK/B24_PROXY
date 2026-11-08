@@ -2,7 +2,7 @@
   <v-app>
     <v-app-bar app color="primary" dark>
       <div class="page-container app-bar-flex">
-        <v-toolbar-title>B24PROXY</v-toolbar-title>
+        <v-toolbar-title>B24PROXY INVOICE</v-toolbar-title>
         <div class="menu-group">
           <v-btn v-for="item in menuItems" :key="item.to" :to="item.to" variant="text" color="white" :class="{ 'v-btn--active': $route.path === item.to }">
             <v-icon left>{{ item.icon }}</v-icon>

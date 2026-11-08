@@ -1,15 +1,11 @@
 /**
- * Роут для получения логов сервера через API.
+ * Роут для получения журнала запросов через API.
+ * Читает записи из PostgreSQL через requestStore.listRequests (не из app.log).
  * Экспортирует Express router с эндпоинтами для работы с логами.
  */
 import express from "express";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 import { requestQueue } from "../../services/queueService.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { listRequests } from "../../services/requestStore.js";
 
 const router = express.Router();
 
@@ -17,11 +13,11 @@ const router = express.Router();
  * @openapi
  * /api/logs:
  *   get:
- *     summary: Получить логи сервера
- *     description: Возвращает последние 1000 логов сервера (новые сверху)
+ *     summary: Получить журнал запросов
+ *     description: Возвращает последние 200 записей счетов из PostgreSQL (новые сверху)
  *     responses:
  *       200:
- *         description: Успешный ответ с логами
+ *         description: Успешный ответ с журналом
  *         content:
  *           application/json:
  *             schema:
@@ -43,52 +39,27 @@ const router = express.Router();
  *                   type: integer
  *                 pending:
  *                   type: integer
+ *       503:
+ *         description: Хранилище запросов недоступно
  */
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   try {
-    const logPath = path.join(__dirname, "../../app.log");
-    const logs = fs.readFileSync(logPath, "utf8");
-    let allLogs = logs
-      .split("\n")
-      .filter((line) => line.trim() !== "")
-      .map((line) => {
-        try {
-          return JSON.parse(line);
-        } catch (e) {
-          return null; // Игнорируем невалидные JSON строки
-        }
-      })
-      .filter(Boolean); // Убираем null из массива
-
-    const getTimestamp = (log) => {
-      if (log.events && log.events.length > 0) {
-        return new Date(log.events[log.events.length - 1].timestamp).getTime();
-      }
-      return new Date(log.timestamp).getTime();
-    };
-    
-    // Сортируем все логи по убыванию timestamp (новые вверху)
-    allLogs.sort((a, b) => getTimestamp(b) - getTimestamp(a));
-
-    // Всегда возвращаем только 1000 самых свежих логов
-    const logsToSend = allLogs.slice(0, 1000);
+    const { total, items } = await listRequests({ limit: 200, kind: "invoice" });
+    const logs = Array.isArray(items) ? items : [];
 
     res.json({
       success: true,
-      logs: logsToSend,
-      total: allLogs.length,
-      shown: logsToSend.length,
+      logs,
+      total: Number.isFinite(total) ? total : logs.length,
+      shown: logs.length,
       queue: [],
       size: requestQueue.size,
-      pending: requestQueue.pending
+      pending: requestQueue.pending,
     });
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: "Ошибка при чтении логов",
-      details: error.message,
-    });
+    console.error("logs: хранилище запросов недоступно:", error?.code || error?.name || "error");
+    res.status(503).json({ success: false, error: "Хранилище запросов недоступно" });
   }
 });
 
-export default router; 
+export default router;

@@ -1,122 +1,12 @@
-console.log("DEBUG queue.js loaded");
 /**
  * Роут для работы с очередью запросов.
  * Экспортирует Express router с эндпоинтами для добавления и получения статуса очереди.
  */
 import express from "express";
-import {
-  requestQueue,
-  getQueuePositionById,
-  getQueueStatusById,
-} from "../../services/queueService.js";
-import logService, { searchLogs } from "../../services/logService.js";
-import { createRequire } from "module";
-import axios from "axios";
-const require = createRequire(import.meta.url);
-const {
-  TARGET_BASE_URL,
-  TARGET_BASE_URL_INVOICE,
-  MAX_RETRIES,
-  REQUEST_TIMEOUT,
-} = require("../../config/proxy-config.cjs");
+import { requestQueue } from "../../services/queueService.js";
+import { listInProgress, searchRequests } from "../../services/requestStore.js";
 
 const router = express.Router();
-
-// Функция с повторами и таймаутом
-async function sendWithRetries(url, retries = MAX_RETRIES) {
-  const urlObj = new URL(url);
-  const dealIdParam = urlObj.searchParams.get("DealID") || null;
-  const dealId = dealIdParam;
-  const s5idParam = urlObj.searchParams.get("s5") || null;
-  const invoceId = s5idParam;
-  const requestId = `${dealId}${invoceId}-${Date.now()}-${Math.random()
-    .toString(36)
-    .substr(2, 6)}`;
-  const logGroup = {
-    id: requestId,
-    dealId,
-    invoceId: invoceId || null,
-    events: [],
-  };
-
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    const eventBase = {
-      attempt,
-      timestamp: new Date()
-        .toLocaleString("ru-RU", {
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-        })
-        .replace(",", ""),
-      dealId,
-    };
-    try {
-      logGroup.events.push({
-        ...eventBase,
-        type: "request",
-        message: `Отправка №${attempt}`,
-      });
-      const source = axios.CancelToken.source();
-      const timeout = setTimeout(() => {
-        source.cancel(`Timeout after ${REQUEST_TIMEOUT} seconds`);
-      }, REQUEST_TIMEOUT);
-      const response = await axios.post(
-        url,
-        {},
-        {
-          cancelToken: source.token,
-        }
-      );
-      clearTimeout(timeout);
-      logGroup.events.push({
-        ...eventBase,
-        type: "response",
-        message: `Ответ`,
-        status: response.status,
-        data: response.data,
-      });
-      if (response.status === 200) {
-        logGroup.success = true;
-        break;
-      } else {
-        logGroup.events.push({
-          ...eventBase,
-          type: "warn",
-          message: `Попытка #${attempt}. Очередь: ${requestQueue.size}. Статус: ${response.status}`,
-        });
-      }
-    } catch (err) {
-      logGroup.events.push({
-        ...eventBase,
-        type: "error",
-        message: `Ошибка: ${err.message}`,
-      });
-    }
-  }
-  if (!logGroup.success) {
-    logGroup.success = false;
-    logGroup.events.push({
-      type: "error",
-      message: `Лимит попыток превышен | Очередь: ${requestQueue.size} | Запрос не будет отправлен`,
-      timestamp: new Date()
-        .toLocaleString("ru-RU", {
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-        })
-        .replace(",", ""),
-      dealId,
-    });
-  }
-  logService("info", "grouped_request", logGroup);
-}
 
 // /**
 //  * @openapi
@@ -201,8 +91,8 @@ async function sendWithRetries(url, retries = MAX_RETRIES) {
  *           type: string
  *         description: ID счета (опционально)
  *     responses:
- *       202:
- *         description: Запрос добавлен в очередь
+ *       200:
+ *         description: Запрос сохранён и добавлен в очередь; расчёт выполняется асинхронно
  *         content:
  *           application/json:
  *             schema:
@@ -214,202 +104,31 @@ async function sendWithRetries(url, retries = MAX_RETRIES) {
  *                 message:
  *                   type: string
  *                   description: Сообщение о результате
+ *                 logId:
+ *                   type: string
+ *                   description: Идентификатор записи в журнале
+ *                 requestId:
+ *                   type: string
+ *                   description: Уникальный ID запроса
  *                 dealId:
  *                   type: string
  *                   description: ID сделки
+ *                 s5:
+ *                   type: string
+ *                   description: ID счета
+ *                 queueSize:
+ *                   type: integer
+ *                   description: Размер очереди после добавления запроса
  *                 queuePosition:
  *                   type: integer
- *                   description: Позиция в очереди
- *                 activeRequests:
- *                   type: integer
- *                   description: Количество активных запросов
+ *                   description: Значение размера очереди при постановке запроса
  *                 target:
  *                   type: string
  *                   description: Целевой URL для запроса
- *                 requestId:
- *                   type: string
- *                   description: Уникальный идентификатор запроса
  */
-router.post("/proxy", (req, res) => {
-  const fullQuery = req.originalUrl.split("?")[1] || "";
-  const urlObj = new URL(`http://dummy?${fullQuery}`);
-  const invoceId = urlObj.searchParams.get("s5");
-  const dealId = urlObj.searchParams.get("DealID");
 
-  // Выбираем целевой URL на основе параметров
-  const baseUrl = invoceId ? TARGET_BASE_URL_INVOICE : TARGET_BASE_URL;
-  const targetUrl = `${baseUrl}?${fullQuery}`;
-
-  // Добавляем событие "В очереди"
-  const requestId = `${dealId || ""}${
-    invoceId || ""
-  }-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
-  const queuedEvent = {
-    type: "queued",
-    message: `Запрос добавлен в очередь.`,
-    timestamp: new Date()
-      .toLocaleString("ru-RU", {
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      })
-      .replace(",", ""),
-    dealId,
-    invoceId: invoceId || null,
-    requestId,
-  };
-  const logGroup = {
-    id: requestId,
-    dealId,
-    invoceId: invoceId || null,
-    status: "queued",
-    events: [queuedEvent],
-  };
-
-  // Сохраняем группу в памяти (можно вынести в отдельный стор)
-  requestQueue._logGroups = requestQueue._logGroups || {};
-  requestQueue._logGroups[requestId] = logGroup;
-
-  // Сразу отправляем событие о новой группе (queued)
-  console.log("logGroup for logService:", logGroup); // DEBUG
-  logService("info", "grouped_request", logGroup);
-
-  requestQueue.add(async () => {
-    logGroup.inProgress = true;
-    logGroup.events.push({
-      type: "processing",
-      message: "Запрос взят в работу",
-      timestamp: new Date()
-        .toLocaleString("ru-RU", {
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-        })
-        .replace(",", ""),
-      dealId,
-      invoceId: invoceId || null,
-      requestId,
-    });
-    logService("info", "grouped_request", logGroup);
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      const eventBase = {
-        attempt,
-        timestamp: new Date()
-          .toLocaleString("ru-RU", {
-            year: "numeric",
-            month: "2-digit",
-            day: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-          })
-          .replace(",", ""),
-        dealId,
-        invoceId: invoceId || null,
-        requestId,
-      };
-      try {
-        logGroup.events.push({
-          ...eventBase,
-          type: "request",
-          message: `Отправка №${attempt}`,
-        });
-        // === duration между queued и последним событием ===
-        const queuedEvent = logGroup.events.find((e) => e.type === "queued");
-        const lastEvent = logGroup.events[logGroup.events.length - 1];
-        if (queuedEvent && lastEvent) {
-          const t1 = new Date(queuedEvent.timestamp).getTime();
-          const t2 = new Date(lastEvent.timestamp).getTime();
-          if (!isNaN(t1) && !isNaN(t2) && t2 > t1) {
-            logGroup.duration = ((t2 - t1) / 1000).toFixed(1);
-          }
-        }
-        // === END ===
-        logService("info", "grouped_request", logGroup);
-        const source = axios.CancelToken.source();
-        const timeout = setTimeout(() => {
-          source.cancel(`Timeout after ${REQUEST_TIMEOUT} seconds`);
-        }, REQUEST_TIMEOUT);
-        const response = await axios.post(
-          targetUrl,
-          {},
-          {
-            cancelToken: source.token,
-          }
-        );
-        clearTimeout(timeout);
-        logGroup.events.push({
-          ...eventBase,
-          type: "response",
-          message: `Ответ`,
-          status: response.status,
-          data: response.data,
-        });
-        logService("info", "grouped_request", logGroup);
-        if (response.status === 200) {
-          break;
-        } else {
-          logGroup.events.push({
-            ...eventBase,
-            type: "warn",
-            message: `Попытка #${attempt}. Очередь: ${requestQueue.size}. Статус: ${response.status}`,
-          });
-          logService("info", "grouped_request", logGroup);
-        }
-      } catch (err) {
-        logGroup.events.push({
-          ...eventBase,
-          type: "error",
-          message: `Ошибка: ${err.message}`,
-        });
-        logService("info", "grouped_request", logGroup);
-      }
-    }
-    // Если не было успешного ответа, добавляем финальную ошибку
-    const hasSuccess = logGroup.events.some(
-      (e) => e.type === "response" && e.status === 200
-    );
-    if (!hasSuccess) {
-      logGroup.events.push({
-        type: "error",
-        message: `Лимит попыток превышен | Очередь: ${requestQueue.size} | Запрос не будет отправлен`,
-        timestamp: new Date()
-          .toLocaleString("ru-RU", {
-            year: "numeric",
-            month: "2-digit",
-            day: "2-digit",
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit",
-          })
-          .replace(",", ""),
-        dealId,
-        invoceId: invoceId || null,
-        requestId,
-      });
-      logService("info", "grouped_request", logGroup);
-    }
-    logGroup.inProgress = false;
-    logService("info", "grouped_request", logGroup);
-  });
-
-  // Возвращаем ответ с указанием целевого адреса
-  res.status(202).json({
-    success: true,
-    message: "Запрос добавлен в очередь.",
-    dealId,
-    queuePosition: requestQueue.size,
-    activeRequests: requestQueue.pending,
-    target: targetUrl,
-    requestId,
-  });
-});
+// Публичный POST /api/queue/proxy регистрируется в index.js до adminAuth и
+// до монтирования этого роутера, поэтому здесь дублирующий маршрут удалён.
 
 /**
  * @openapi
@@ -615,77 +334,33 @@ router.post("/proxy", (req, res) => {
  *                   type: string
  *                   description: Детали ошибки
  */
-import { readFileSync } from "fs";
-import { join, dirname } from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const LOG_FILE_PATH = join(__dirname, "../../app.log");
-
-router.get("/in-progress", (req, res) => {
+router.get("/in-progress", async (req, res) => {
   try {
-    const { id } = req.query;
-
-    // Читаем и парсим лог-файл
-    const logContent = readFileSync(LOG_FILE_PATH, "utf-8");
-    const lines = logContent.split("\n").filter((line) => line.trim());
-
-    // Фильтруем строки с inProgress:true и парсим их в объекты
-    let inProgressItems = lines
-      .filter((line) => line.includes('"inProgress":true'))
-      .map((line) => {
-        try {
-          return JSON.parse(line);
-        } catch (e) {
-          console.error("Error parsing log line:", e);
-          return null;
-        }
-      })
-      .filter(Boolean) // Удаляем null (невалидные JSON)
-      .map((entry) => {
-        return {
-          id: entry.id,
-          dealId: entry.dealId,
-          invoceId: entry.invoceId,
-          status: entry.status,
-          inProgress: true,
-          timestamp: entry.timestamp || null,
-          queuePosition: null,
-        };
-      });
-
-    let queuePosition = null;
-    for (let i = 0; i < inProgressItems.length; i++) {
-      if (id && inProgressItems[i].dealId === id) {
-        queuePosition = i;
-      }
-      if (id && inProgressItems[i].invoceId === id) {
-        queuePosition = i;
-      }
-    }
+    const requests = (await listInProgress()) || [];
+    const items = requests.map((r) => ({
+      id: r.id ?? null,
+      dealId: r.dealId ?? null,
+      invoceId: r.invoceId ?? null,
+      status: r.state ?? null,
+      inProgress: Boolean(r.inProgress),
+      timestamp: r.timestamp ?? null,
+    }));
 
     res.json({
       success: true,
-      count: inProgressItems.length,
-      items: inProgressItems,
-      queuePosition: queuePosition,
+      count: items.length,
+      items,
+      queuePosition: null,
     });
   } catch (error) {
-    console.error("Error reading log file:", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to read log file",
-      details: error.message,
-    });
+    console.error("queue: хранилище запросов недоступно:", error?.code || error?.name || "error");
+    res.status(503).json({ success: false, error: "Хранилище запросов недоступно" });
   }
 });
 
-router.get("/position", (req, res) => {
+router.get("/position", async (req, res) => {
   const { dealId, invoiceId, id } = req.query;
-  const searchParams = { dealId, invoiceId, id };
 
-  // Валидация входных параметров
   if (!dealId && !invoiceId && !id) {
     return res.status(400).json({
       success: false,
@@ -694,7 +369,6 @@ router.get("/position", (req, res) => {
     });
   }
 
-  // Собираем полную информацию о запросе
   const responseData = {
     success: true,
     requestId: id || null,
@@ -711,102 +385,61 @@ router.get("/position", (req, res) => {
     details: {},
   };
 
-  // Проверяем активную очередь
-  const queueResult = getQueueStatusById(searchParams);
-  if (queueResult) {
-    const { status, position, logGroup } = queueResult;
+  try {
+    const entries = (await searchRequests({ id, dealId, invoiceId })) || [];
+    if (entries.length === 0) {
+      responseData.success = false;
+      responseData.status = "not_found";
+      responseData.message = `Запрос с ${
+        id ? `ID=${id}` : dealId ? `dealId=${dealId}` : `invoiceId=${invoiceId}`
+      } не найден`;
+      return res.status(404).json(responseData);
+    }
 
-    // Обновляем основную информацию
-    responseData.status = status;
-    responseData.position = status === "queued" ? position : null;
-    responseData.timestamp = logGroup?.timestamp || new Date().toISOString();
-    responseData.message =
-      status === "queued"
-        ? `Запрос в очереди, позиция: ${position + 1}`
-        : "Запрос в обработке";
+    // newest first: берём самую свежую запись.
+    const request = entries[0];
+    const events = Array.isArray(request.events) ? request.events : [];
+    const state = request.state;
 
-    // Добавляем события из очереди
-    if (logGroup?.events?.length) {
-      responseData.events = logGroup.events;
-      responseData.lastEvent = logGroup.events[logGroup.events.length - 1];
+    // queued/processing как есть; succeeded/failed/interrupted/unknown → completed.
+    responseData.status =
+      state === "queued" || state === "processing" ? state : "completed";
+    responseData.requestId = request.id ?? responseData.requestId;
+    responseData.dealId = request.dealId ?? responseData.dealId;
+    responseData.invoiceId = request.invoceId ?? responseData.invoiceId;
+    responseData.timestamp = request.timestamp ?? responseData.timestamp;
 
-      // Вычисляем длительность выполнения
-      if (logGroup.events.length > 1) {
-        const startTime = new Date(logGroup.events[0].timestamp);
-        const endTime = new Date(
-          logGroup.events[logGroup.events.length - 1].timestamp
-        );
-        if (!isNaN(startTime) && !isNaN(endTime)) {
-          responseData.duration = endTime - startTime;
-        }
+    responseData.events = events;
+    responseData.lastEvent = events.length ? events[events.length - 1] : null;
+
+    // p-queue не раскрывает идентификаторы задач; точную позицию не выдумываем.
+    responseData.position = null;
+
+    // Длительность выполнения в миллисекундах.
+    if (events.length > 1) {
+      const startTime = new Date(events[0].timestamp).getTime();
+      const endTime = new Date(events[events.length - 1].timestamp).getTime();
+      if (!isNaN(startTime) && !isNaN(endTime)) {
+        responseData.duration = endTime - startTime;
       }
     }
 
-    // Добавляем дополнительные детали
+    const hasErrors = events.some((e) => e.type === "error");
     responseData.details = {
-      inProgress: logGroup?.inProgress || false,
-      success: logGroup?.success,
-      attemptCount:
-        logGroup?.events?.filter((e) => e.type === "request").length || 0,
-      lastUpdated: logGroup?.events?.[logGroup.events.length - 1]?.timestamp,
+      state,
+      inProgress: Boolean(request.inProgress),
+      success: state === "succeeded",
+      hasErrors,
+      attemptCount: events.filter((e) => e.type === "request").length,
+      lastUpdated: responseData.lastEvent?.timestamp ?? null,
+      completedAt: responseData.status === "completed" ? responseData.timestamp : null,
     };
 
     return res.json(responseData);
+  } catch (error) {
+    console.error("queue: хранилище запросов недоступно:", error?.code || error?.name || "error");
+    return res.status(503).json({ success: false, error: "Хранилище запросов недоступно" });
   }
-
-  // Если не нашли в активной очереди, ищем в логах
-  const logEntries = searchLogs(searchParams);
-  if (logEntries.length > 0) {
-    // Сортируем по времени (новые записи первыми)
-    const sortedLogs = logEntries.sort(
-      (a, b) => new Date(b.timestamp) - new Date(a.timestamp)
-    );
-
-    // Берем самую свежую запись
-    const latestLog = sortedLogs[0];
-
-    // Обновляем основную информацию
-    responseData.status = "completed";
-    responseData.timestamp = latestLog.timestamp;
-    responseData.message = "Запрос уже был обработан";
-    responseData.lastEvent =
-      latestLog.events?.[latestLog.events.length - 1] || null;
-    responseData.completedAt = latestLog.timestamp;
-
-    // Добавляем все события
-    if (latestLog.events?.length) {
-      responseData.events = latestLog.events;
-
-      // Вычисляем длительность выполнения
-      if (latestLog.events.length > 1) {
-        const startTime = new Date(latestLog.events[0].timestamp);
-        const endTime = new Date(
-          latestLog.events[latestLog.events.length - 1].timestamp
-        );
-        if (!isNaN(startTime) && !isNaN(endTime)) {
-          responseData.duration = endTime - startTime;
-        }
-      }
-    }
-
-    // Добавляем дополнительные детали
-    responseData.details = {
-      success: latestLog.success,
-      attemptCount:
-        latestLog.events?.filter((e) => e.type === "request").length || 0,
-      completedAt: latestLog.timestamp,
-      hasErrors: latestLog.events?.some((e) => e.type === "error"),
-    };
-
-    return res.json(responseData);
-  }
-
-  // Если не нашли нигде
-  responseData.success = false;
-  responseData.message = `Запрос с ${
-    id ? `ID=${id}` : dealId ? `dealId=${dealId}` : `invoiceId=${invoiceId}`
-  } не найден`;
-  return res.status(404).json(responseData);
 });
 
 export default router;
