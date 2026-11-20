@@ -52,7 +52,14 @@ function readAdminPasswordFile() {
  * @returns {{ user: string }}
  */
 export function loadAdminConfig() {
-  const user = process.env.ADMIN_USER;
+  let user = process.env.ADMIN_USER;
+  if (process.env.ADMIN_USER_FILE) {
+    try {
+      user = fs.readFileSync(process.env.ADMIN_USER_FILE, "utf8").replace(/\r?\n$/, "");
+    } catch {
+      user = "";
+    }
+  }
   if (!user) {
     console.error("adminAuth: ADMIN_USER не задан — запуск остановлен");
     process.exit(1);

@@ -24,9 +24,10 @@ COPY --from=build /app/middlewares ./middlewares
 COPY --from=build /app/routes ./routes
 COPY --from=build /app/services ./services
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/docker-entrypoint.sh ./docker-entrypoint.sh
 
-RUN mkdir -p /app/data && chown -R node:node /app
+RUN mkdir -p /app/data && chmod 0555 /app/docker-entrypoint.sh && chown -R node:node /app
 USER node
 
 EXPOSE 7776 8776
-CMD ["node", "index.js"]
+ENTRYPOINT ["./docker-entrypoint.sh"]

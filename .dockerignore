@@ -6,3 +6,11 @@ dist
 ._*
 .env
 .env.*
+secrets
+data
+scratch
+acme
+*.pem
+*.key
+*.p12
+*.pfx

@@ -17,9 +17,11 @@ import { initWebSocketServer } from "./services/websocketService.js";
 import { checkDatabase, markInterrupted, pool } from "./services/requestStore.js";
 import { handleProxyRequest, INSTANCE_REF } from "./services/proxyHandler.js";
 import { syncRecentInvoices } from "./services/invoiceSync.js";
+import { isInvoiceSyncEnabled, startInvoiceSyncScheduler } from "./services/invoiceSyncScheduler.js";
 import logsRouter from "./routes/api/logs.js";
 import queueRouter from "./routes/api/queue.js";
 import statsRouter from "./routes/api/stats.js";
+import webhooksRouter from "./routes/api/webhooks.js";
 import errorHandler from "./middlewares/errorHandler.js";
 import adminAuth, { loadAdminConfig } from "./middlewares/adminAuth.js";
 import swaggerJsdoc from "swagger-jsdoc";
@@ -60,6 +62,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Публичный приём запросов и проверка здоровья сохраняют действующие webhook-маршруты.
+app.use("/api/webhook", webhooksRouter);
 app.all("/api/proxy", handleProxyRequest);
 app.post("/api/queue/proxy", handleProxyRequest);
 app.get("/healthz", async (req, res) => {
@@ -140,9 +143,11 @@ async function start() {
       invoiceSyncRunning = false;
     }
   };
-  const invoiceSyncTimer = setInterval(runPeriodicSync, SYNC_INTERVAL_MS);
-  invoiceSyncTimer.unref();
-  void runPeriodicSync();
+  startInvoiceSyncScheduler({
+    enabled: isInvoiceSyncEnabled(),
+    intervalMs: SYNC_INTERVAL_MS,
+    runSync: runPeriodicSync,
+  });
 
   server.listen(PROXY_PORT, SERVER_IP, () => {
     console.log(`Публичный PROXY запущен: ${SERVER_IP}:${PROXY_PORT}`);

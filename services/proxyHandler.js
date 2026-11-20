@@ -279,7 +279,7 @@ export async function handleProxyRequest(req, res) {
     s5,
     queueSize,
     queuePosition,
-    target: `${target.origin}${target.pathname}`,
+    target: kind,
   });
 }
 

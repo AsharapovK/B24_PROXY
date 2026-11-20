@@ -487,7 +487,7 @@ export async function verifySnapshotCompleteness(items, {
  * @param {object} item
  * @returns {Promise<{ invoiceId: string, status: 'updated' | 'inserted' | 'skipped' }>}
  */
-export async function syncSingleInvoice(client, item) {
+export async function syncSingleInvoice(client, item, { sourceType = "reconciliation" } = {}) {
   const invoiceId = toId(item.id);
   if (!invoiceId) return { invoiceId: null, status: "skipped" };
 
@@ -693,6 +693,16 @@ export async function syncSingleInvoice(client, item) {
         (paymentVersion.getTime() + proxyDelayToleranceMs) >= new Date(previous.payment_version).getTime());
   }
 
+  const isDeletedBasis = Boolean(
+    previous?.status_basis?.startsWith("b24_deal_deleted") ||
+    previous?.status_basis?.startsWith("b24_invoice_deleted") ||
+    previous?.invoice_status_basis?.startsWith("b24_deal_deleted") ||
+    previous?.invoice_status_basis?.startsWith("b24_invoice_deleted")
+  );
+  if (isDeletedBasis) {
+    invoiceAccepted = false;
+  }
+
   if (!isNew && !factsAccepted && !invoiceAccepted && !paymentAccepted) {
     return { invoiceId, status: "skipped" };
   }
@@ -852,7 +862,7 @@ export async function syncSingleInvoice(client, item) {
        payment_status, status_basis, source_version, payload, occurred_at,
        invoice_status_basis, payment_status_basis, invoice_status_changed_at, payment_status_changed_at,
        invoice_status_time_basis, payment_status_time_basis)
-     VALUES ($1, 'reconciliation', $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15)
+     VALUES ($1, $16, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15)
      ON CONFLICT (event_key) DO NOTHING`,
     [
       invoiceId,
@@ -870,6 +880,7 @@ export async function syncSingleInvoice(client, item) {
       paymentAccepted ? updatedTime : null,
       invoiceAccepted ? "source_timestamp" : "unknown",
       paymentAccepted ? "source_timestamp" : "unknown",
+      sourceType,
     ]
   );
 
@@ -884,6 +895,278 @@ function nextStatus(isNew, invoiceAccepted, invoiceStatus, previous) {
 function nextPayment(isNew, paymentAccepted, paymentStatus, previous) {
   if (paymentAccepted) return paymentStatus;
   return isNew ? paymentStatus : previous.payment_status;
+}
+
+/**
+ * Точечная синхронизация единичного счета из Bitrix24 по его ID.
+ * @param {string | number} invoiceId
+ * @param {object} [options]
+ * @param {string} [options.webhookUrl=DEFAULT_WEBHOOK_URL]
+ * @param {import('pg').Pool} [options.clientPool=pool]
+ * @param {Function} [options.request=callBitrix]
+ * @param {string} [options.sourceType='webhook_push']
+ * @returns {Promise<{ invoiceId: string, status: string }>}
+ */
+export async function syncSingleInvoiceById(invoiceId, {
+  webhookUrl = DEFAULT_WEBHOOK_URL,
+  clientPool = pool,
+  request = callBitrix,
+  sourceType = "webhook_push",
+} = {}) {
+  const targetUrl = webhookUrl || (request !== callBitrix ? "https://b24.mock.invalid/" : undefined);
+  if (!targetUrl) throw new Error("B24_WEBHOOK_URL is required");
+
+  const normalizedId = toId(invoiceId);
+  if (!normalizedId) throw new Error("invoiceId is required");
+
+  const data = await request(targetUrl, "crm.item.get", {
+    entityTypeId: ENTITY_TYPE_ID,
+    id: normalizedId,
+  });
+
+  const item = data?.result?.item;
+  if (!item) {
+    throw new Error(`Invoice ${normalizedId} not found in Bitrix24`);
+  }
+
+  const client = await clientPool.connect();
+  try {
+    await client.query("BEGIN");
+    const res = await syncSingleInvoice(client, item, { sourceType });
+    await client.query("COMMIT");
+    return res;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Пакетная синхронизация нескольких счетов через Bitrix24 batch REST API.
+ * До 50 счетов за один сетевой HTTP-запрос (пакетами).
+ * @param {Array<string | number>} invoiceIds
+ * @param {object} [options]
+ * @param {string} [options.webhookUrl=DEFAULT_WEBHOOK_URL]
+ * @param {import('pg').Pool} [options.clientPool=pool]
+ * @param {Function} [options.request=callBitrix]
+ * @param {string} [options.sourceType='webhook_push']
+ * @returns {Promise<{ total: number, inserted: number, updated: number, skipped: number, errors: Array<object> }>}
+ */
+export async function syncInvoicesBatch(invoiceIds, {
+  webhookUrl = DEFAULT_WEBHOOK_URL,
+  clientPool = pool,
+  request = callBitrix,
+  sourceType = "webhook_push",
+} = {}) {
+  const targetUrl = webhookUrl || (request !== callBitrix ? "https://b24.mock.invalid/" : undefined);
+  if (!targetUrl) throw new Error("B24_WEBHOOK_URL is required");
+
+  const validIds = [...new Set((invoiceIds || []).map(toId).filter(Boolean))];
+  if (validIds.length === 0) {
+    return { total: 0, inserted: 0, updated: 0, skipped: 0, errors: [] };
+  }
+
+  // Если всего 1 счет — используем быстрый одиночный запрос crm.item.get
+  if (validIds.length === 1) {
+    try {
+      const res = await syncSingleInvoiceById(validIds[0], {
+        webhookUrl: targetUrl,
+        clientPool,
+        request,
+        sourceType,
+      });
+      return {
+        total: 1,
+        inserted: res.status === "inserted" ? 1 : 0,
+        updated: res.status === "updated" ? 1 : 0,
+        skipped: res.status === "skipped" ? 1 : 0,
+        errors: [],
+      };
+    } catch (err) {
+      return {
+        total: 1,
+        inserted: 0,
+        updated: 0,
+        skipped: 0,
+        errors: [{ invoiceId: validIds[0], error: err.message }],
+      };
+    }
+  }
+
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
+  const errors = [];
+
+  // Разбиваем на пакеты по 50 (лимит Б24 для batch)
+  for (let i = 0; i < validIds.length; i += 50) {
+    const chunk = validIds.slice(i, i + 50);
+    const cmd = {};
+    for (const id of chunk) {
+      cmd[`get_${id}`] = `crm.item.get?entityTypeId=${ENTITY_TYPE_ID}&id=${id}`;
+    }
+
+    let batchData;
+    try {
+      batchData = await request(targetUrl, "batch", { halt: 0, cmd });
+    } catch (err) {
+      for (const id of chunk) {
+        errors.push({ invoiceId: id, error: `Batch request error: ${err.message}` });
+      }
+      continue;
+    }
+
+    const batchResult = batchData?.result?.result || {};
+    const batchErrors = batchData?.result?.result_error || {};
+
+    for (const id of chunk) {
+      if (batchErrors[`get_${id}`]) {
+        errors.push({
+          invoiceId: id,
+          error: String(batchErrors[`get_${id}`]?.error_description || batchErrors[`get_${id}`]?.error || "Batch item error"),
+        });
+        continue;
+      }
+
+      const item = batchResult[`get_${id}`]?.item;
+      if (!item) {
+        errors.push({ invoiceId: id, error: `Invoice ${id} not found in batch response` });
+        continue;
+      }
+
+      const client = await clientPool.connect();
+      try {
+        await client.query("BEGIN");
+        const res = await syncSingleInvoice(client, item, { sourceType });
+        await client.query("COMMIT");
+        if (res.status === "inserted") inserted++;
+        else if (res.status === "updated") updated++;
+        else skipped++;
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        errors.push({ invoiceId: id, error: err.message });
+      } finally {
+        client.release();
+      }
+    }
+  }
+
+  return {
+    total: validIds.length,
+    inserted,
+    updated,
+    skipped,
+    errors,
+  };
+}
+
+/**
+ * Обработка удаления сделки (ONCRMDEALDELETE).
+ * Переводит все активные счета по сделке в статус cancelled (Soft Delete).
+ * @param {string | number} dealId
+ * @param {object} [options]
+ * @param {import('pg').Pool} [options.clientPool=pool]
+ * @returns {Promise<{ dealId: string, affected: number, invoiceIds: string[] }>}
+ */
+export async function handleDealDelete(dealId, { clientPool = pool } = {}) {
+  const normalizedDealId = toId(dealId);
+  if (!normalizedDealId) throw new Error("dealId is required");
+
+  const client = await clientPool.connect();
+  try {
+    await client.query("BEGIN");
+    const res = await client.query(
+      `UPDATE public.invoices
+       SET invoice_status = 'cancelled',
+           status_basis = 'b24_deal_deleted',
+           invoice_status_basis = 'b24_deal_deleted',
+           status_changed_at = now(),
+           invoice_status_changed_at = now(),
+           updated_at = now()
+       WHERE deal_id = $1
+         AND invoice_status = 'active'
+       RETURNING invoice_id`,
+      [normalizedDealId]
+    );
+
+    const invoiceIds = res.rows.map((r) => r.invoice_id);
+    for (const invoiceId of invoiceIds) {
+      const eventKey = `deal_deletion:${normalizedDealId}:${invoiceId}:${Date.now()}`;
+      await client.query(
+        `INSERT INTO public.invoice_events
+          (invoice_id, source_type, event_key, event_type, invoice_status,
+           payment_status, status_basis, source_version, payload, occurred_at,
+           invoice_status_basis, invoice_status_changed_at)
+         VALUES ($1, 'deal_deletion', $2, 'status_changed', 'cancelled',
+                 'unknown', 'b24_deal_deleted', now(), $3::jsonb, now(),
+                 'b24_deal_deleted', now())
+         ON CONFLICT (event_key) DO NOTHING`,
+        [invoiceId, eventKey, JSON.stringify({ deal_id: normalizedDealId, reason: "b24_deal_deleted" })]
+      );
+    }
+    await client.query("COMMIT");
+    return { dealId: normalizedDealId, affected: res.rowCount || 0, invoiceIds };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Обработка удаления счета (ONCRMDYNAMICITEMDELETE_31).
+ * Переводит счет в статус cancelled (Soft Delete).
+ * @param {string | number} invoiceId
+ * @param {object} [options]
+ * @param {import('pg').Pool} [options.clientPool=pool]
+ * @returns {Promise<{ invoiceId: string, affected: number }>}
+ */
+export async function handleInvoiceDelete(invoiceId, { clientPool = pool } = {}) {
+  const normalizedInvoiceId = toId(invoiceId);
+  if (!normalizedInvoiceId) throw new Error("invoiceId is required");
+
+  const client = await clientPool.connect();
+  try {
+    await client.query("BEGIN");
+    const res = await client.query(
+      `UPDATE public.invoices
+       SET invoice_status = 'cancelled',
+           status_basis = 'b24_invoice_deleted',
+           invoice_status_basis = 'b24_invoice_deleted',
+           status_changed_at = now(),
+           invoice_status_changed_at = now(),
+           updated_at = now()
+       WHERE invoice_id = $1
+         AND invoice_status = 'active'
+       RETURNING invoice_id`,
+      [normalizedInvoiceId]
+    );
+
+    if ((res.rowCount || 0) > 0) {
+      const eventKey = `invoice_deletion:${normalizedInvoiceId}:${Date.now()}`;
+      await client.query(
+        `INSERT INTO public.invoice_events
+          (invoice_id, source_type, event_key, event_type, invoice_status,
+           payment_status, status_basis, source_version, payload, occurred_at,
+           invoice_status_basis, invoice_status_changed_at)
+         VALUES ($1, 'invoice_deletion', $2, 'status_changed', 'cancelled',
+                 'unknown', 'b24_invoice_deleted', now(), $3::jsonb, now(),
+                 'b24_invoice_deleted', now())
+         ON CONFLICT (event_key) DO NOTHING`,
+        [normalizedInvoiceId, eventKey, JSON.stringify({ invoice_id: normalizedInvoiceId, reason: "b24_invoice_deleted" })]
+      );
+    }
+    await client.query("COMMIT");
+    return { invoiceId: normalizedInvoiceId, affected: res.rowCount || 0 };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**
